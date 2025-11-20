@@ -4,6 +4,7 @@ from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, ConfigDict
 
 from app.verifier import run_verification
+from app.services.linkedin_cookie_verifier import warm_playwright
 
 app = FastAPI(title="LinkedIn Cookie Verifier")
 
@@ -35,6 +36,11 @@ async def verify_cookies(payload: CookiePayload):
 async def health():
     """Simple readiness probe."""
     return {"status": "ok"}
+
+@app.on_event("startup")
+async def startup_event():
+    """Prime Playwright browsers if Playwright mode is enabled."""
+    await warm_playwright()
 
 
 @app.get("/")

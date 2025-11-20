@@ -43,6 +43,8 @@ INSTALL_PLAYWRIGHT_HINT = "Install Playwright with scripts/install_playwright.sh
 FALLBACK_HINT = (
     f"{INSTALL_PLAYWRIGHT_HINT} or set LINKEDIN_COOKIE_VERIFIER_API to an external verification service."
 )
+DEFAULT_PLAYWRIGHT_BROWSERS_PATH = os.getenv("PLAYWRIGHT_BROWSERS_PATH") or "/opt/render/project/.cache/ms-playwright"
+os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", DEFAULT_PLAYWRIGHT_BROWSERS_PATH)
 
 
 def determine_verifier_mode() -> Tuple[str, str]:
@@ -117,6 +119,8 @@ class _LinkedInCookieVerifier:
         self.api_key = os.getenv("LINKEDIN_COOKIE_VERIFIER_API_KEY")
         self.api_header_name = os.getenv("LINKEDIN_COOKIE_VERIFIER_API_HEADER", "Authorization")
         self.api_timeout = float(os.getenv("LINKEDIN_COOKIE_VERIFIER_TIMEOUT", "15"))
+        self.browsers_path = os.getenv("PLAYWRIGHT_BROWSERS_PATH") or DEFAULT_PLAYWRIGHT_BROWSERS_PATH
+        os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", self.browsers_path)
 
         # User agents for rotation
         self.user_agents = [
@@ -130,12 +134,26 @@ class _LinkedInCookieVerifier:
 
     def _known_browser_paths(self) -> list[Path]:
         paths = []
-        env_path = os.getenv("PLAYWRIGHT_BROWSERS_PATH")
-        if env_path:
-            paths.append(Path(env_path))
-        # Default Playwright cache path
-        paths.append(Path.home() / ".cache" / "ms-playwright")
-        return [p for p in paths if p]
+        for candidate in [
+            self.browsers_path,
+            DEFAULT_PLAYWRIGHT_BROWSERS_PATH,
+            os.getenv("PLAYWRIGHT_BROWSERS_PATH"),
+            "/opt/render/project/.cache/ms-playwright",
+            "/tmp/playwright",
+            Path.home() / ".cache" / "ms-playwright",
+        ]:
+            if not candidate:
+                continue
+            paths.append(Path(candidate))
+        # De-duplicate while preserving order
+        seen = set()
+        unique_paths = []
+        for p in paths:
+            if p in seen:
+                continue
+            unique_paths.append(p)
+            seen.add(p)
+        return unique_paths
 
     def _chromium_installed(self) -> bool:
         for base in self._known_browser_paths():
@@ -758,6 +776,17 @@ async def verify_linkedin_cookies(
     return await verifier.verify_linkedin_cookies(li_at, jsessionid, tenant_id, user_id)
 
 
+async def warm_playwright() -> None:
+    """Ensure Playwright browsers are present at startup."""
+    verifier = await get_cookie_verifier()
+    if verifier.verifier_mode != "playwright":
+        return
+    try:
+        await verifier._ensure_playwright_browsers()
+    except Exception as exc:  # pragma: no cover - startup warm path
+        logger.error("Playwright warmup failed: %s", exc)
+
+
 def get_cookie_verifier_health() -> Dict[str, Any]:
     """Return readiness metadata for cookie verification services."""
 
@@ -769,6 +798,7 @@ def get_cookie_verifier_health() -> Dict[str, Any]:
         "reason": reason,
         "playwrightAvailable": async_playwright is not None,
         "apiConfigured": bool(os.getenv("LINKEDIN_COOKIE_VERIFIER_API")),
+        "browsersPath": os.getenv("PLAYWRIGHT_BROWSERS_PATH") or DEFAULT_PLAYWRIGHT_BROWSERS_PATH,
     }
 
 
