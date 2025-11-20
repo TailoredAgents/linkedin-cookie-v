@@ -1,6 +1,6 @@
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, ConfigDict
 
 from app.verifier import run_verification
@@ -35,3 +35,24 @@ async def verify_cookies(payload: CookiePayload):
 async def health():
     """Simple readiness probe."""
     return {"status": "ok"}
+
+
+@app.get("/")
+async def root():
+    """Landing endpoint with usage guidance."""
+    return {"status": "ok", "message": "POST /verify with li_at and optional jsessionid"}
+
+
+@app.get("/verify")
+async def verify_cookies_get():
+    """Explicit guidance for clients accidentally using GET."""
+    raise HTTPException(
+        status_code=405,
+        detail="Use POST /verify with JSON body {\"li_at\": \"...\", \"jsessionid\": \"\"}",
+    )
+
+
+@app.get("/favicon.ico")
+async def favicon():
+    """Silence favicon lookups in logs."""
+    return Response(status_code=204)
