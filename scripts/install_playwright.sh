@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Install Playwright Chromium into a writable path (works on Render build machines).
-export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/tmp/playwright}"
+# Install Playwright Chromium into a writable path that persists in the Render image.
+# /opt/render/project/.cache is Render's recommended cache location.
+export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/opt/render/project/.cache/ms-playwright}"
 mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"

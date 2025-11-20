@@ -14,10 +14,12 @@ Features:
 """
 
 import asyncio
+from asyncio.subprocess import PIPE, STDOUT
 import logging
 import os
 import random
 import time
+from pathlib import Path
 from typing import Dict, Any, Tuple, Optional
 from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
@@ -123,6 +125,26 @@ class _LinkedInCookieVerifier:
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0"
         ]
+        self._install_lock = asyncio.Lock()
+        self._browsers_checked = False
+
+    def _known_browser_paths(self) -> list[Path]:
+        paths = []
+        env_path = os.getenv("PLAYWRIGHT_BROWSERS_PATH")
+        if env_path:
+            paths.append(Path(env_path))
+        # Default Playwright cache path
+        paths.append(Path.home() / ".cache" / "ms-playwright")
+        return [p for p in paths if p]
+
+    def _chromium_installed(self) -> bool:
+        for base in self._known_browser_paths():
+            if not base.exists():
+                continue
+            for candidate in base.glob("chromium*/*/headless_shell"):
+                if candidate.exists():
+                    return True
+        return False
 
     async def _ensure_browser_ready(self) -> None:
         """Ensure browser and context are ready for verification"""
@@ -134,6 +156,7 @@ class _LinkedInCookieVerifier:
                 "Install the optional dependency with `pip install playwright` "
                 "and run `playwright install`."
             ) from _PLAYWRIGHT_IMPORT_ERROR
+        await self._ensure_playwright_browsers()
         if not self.browser:
             playwright = await async_playwright().start()
             self.browser = await playwright.chromium.launch(
@@ -197,6 +220,62 @@ class _LinkedInCookieVerifier:
 
         self.last_verification_time = time.time()
         return True
+
+    async def _ensure_playwright_browsers(self) -> None:
+        """Install Playwright Chromium if it is missing at runtime."""
+        if self._browsers_checked:
+            return
+
+        async with self._install_lock:
+            if self._browsers_checked:
+                return
+
+            if self._chromium_installed():
+                self._browsers_checked = True
+                return
+
+            browsers_path = os.getenv("PLAYWRIGHT_BROWSERS_PATH")
+            logger.warning(
+                "Playwright Chromium missing%s; attempting runtime install...",
+                f" at {browsers_path}" if browsers_path else "",
+            )
+
+            python_bin = os.getenv("PYTHON_BIN") or "python3"
+            env = os.environ.copy()
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    python_bin,
+                    "-m",
+                    "playwright",
+                    "install",
+                    "chromium",
+                    stdout=PIPE,
+                    stderr=STDOUT,
+                    env=env,
+                )
+                stdout, _ = await proc.communicate()
+            except FileNotFoundError as exc:
+                raise RuntimeError(
+                    f"Playwright Chromium not installed and failed to run installer: {exc}. {FALLBACK_HINT}"
+                ) from exc
+
+            output = (stdout or b"").decode(errors="ignore")
+            if proc.returncode != 0:
+                logger.error("Playwright runtime install failed (%s): %s", proc.returncode, output[:400])
+                raise RuntimeError(
+                    "Playwright Chromium is missing and automated install failed. "
+                    f"{FALLBACK_HINT}"
+                )
+
+            if not self._chromium_installed():
+                logger.error("Playwright install completed but Chromium not found. Output: %s", output[:400])
+                raise RuntimeError(
+                    "Playwright Chromium still missing after install. "
+                    f"{FALLBACK_HINT}"
+                )
+
+            logger.info("Playwright Chromium installed successfully at runtime.")
+            self._browsers_checked = True
 
     async def _verify_via_api(
         self,

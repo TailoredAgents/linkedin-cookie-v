@@ -13,13 +13,13 @@ Local setup
 1. Python 3.11 recommended (`runtime.txt` set to 3.11.9).
 2. `python -m venv .venv && source .venv/bin/activate`
 3. `pip install -r requirements.txt`
-4. `bash scripts/install_playwright.sh` (downloads Chromium to `PLAYWRIGHT_BROWSERS_PATH`, default `/tmp/playwright`)
+4. `bash scripts/install_playwright.sh` (downloads Chromium to `PLAYWRIGHT_BROWSERS_PATH`, default `/opt/render/project/.cache/ms-playwright`)
 5. `uvicorn app.main:app --host 0.0.0.0 --port 8000`
 
 Environment
 -----------
 - `LINKEDIN_VERIFIER_MODE=playwright` (set in this service)
-- `PLAYWRIGHT_BROWSERS_PATH=/tmp/playwright` (keeps browser download writable on Render)
+- `PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/.cache/ms-playwright` (keeps browser download cached in the Render image)
 - `PYTHONUNBUFFERED=1`
 - Optional fallback settings: `LINKEDIN_COOKIE_VERIFIER_API`, `LINKEDIN_COOKIE_VERIFIER_API_KEY`, `LINKEDIN_COOKIE_VERIFIER_API_HEADER`.
 
