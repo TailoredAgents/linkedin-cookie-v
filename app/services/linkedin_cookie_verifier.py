@@ -28,11 +28,18 @@ from enum import Enum
 import httpx
 
 try:
-    from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+    from playwright.async_api import (
+        async_playwright,
+        Browser,
+        BrowserContext,
+        Page,
+        TimeoutError as PlaywrightTimeoutError,
+    )
     _PLAYWRIGHT_IMPORT_ERROR = None
 except ImportError as exc:  # pragma: no cover - exercised when playwright missing
     async_playwright = None  # type: ignore[assignment]
     Browser = BrowserContext = Page = Any  # type: ignore[assignment]
+    PlaywrightTimeoutError = Exception  # type: ignore[assignment]
     _PLAYWRIGHT_IMPORT_ERROR = exc
 
 from .audit_logging_service import audit_logger, AuditEventType, AuditSeverity
@@ -532,83 +539,86 @@ class _LinkedInCookieVerifier:
 
                 # Look for profile elements
                 try:
-                    # Wait for navigation elements to load
-                    await page.wait_for_selector("nav.global-nav", timeout=15000)
+                    nav_timeout_ms = int(os.getenv("LINKEDIN_NAV_TIMEOUT_MS", "15000"))
+                    nav_loaded = False
+                    try:
+                        # Wait for navigation bar, but tolerate slow loads by falling back.
+                        await page.wait_for_selector("nav.global-nav", timeout=nav_timeout_ms)
+                        nav_loaded = True
+                    except PlaywrightTimeoutError:
+                        logger.warning("Timed out waiting for LinkedIn nav; falling back to profile page scrape.")
                     await self._human_delay(2, 4)
-
-                    # Try to find the "Me" menu button
-                    me_button_selectors = [
-                        "button[aria-label*='View profile']",
-                        "button.global-nav__primary-link--me",
-                        "div.global-nav__me > button",
-                        "img.global-nav__me-photo",
-                        "a.global-nav__primary-link--me-menu-trigger"
-                    ]
-
-                    me_button = None
-                    for selector in me_button_selectors:
-                        try:
-                            me_button = await page.wait_for_selector(selector, timeout=5000)
-                            if me_button:
-                                break
-                        except:
-                            continue
-
-                    if not me_button:
-                        logger.warning("Could not find profile menu button")
-                        return CookieVerificationResult(
-                            status=VerificationStatus.INVALID,
-                            error_message="Could not locate profile menu - possibly invalid session"
-                        )
-
-                    # Click on the Me menu
-                    await me_button.click()
-                    await self._human_delay(2, 4)
-
-                    # Look for profile information in the dropdown
-                    profile_selectors = [
-                        "div.global-nav__me-content a[href*='/in/']",
-                        "a[data-control-name='identity_welcome_message']",
-                        "div.global-nav__me-content div.text-heading-small",
-                        "div.global-nav__me-content .t-16"
-                    ]
 
                     username = None
                     full_name = None
                     profile_url = None
 
-                    # Extract profile URL and username
-                    for selector in profile_selectors:
-                        try:
-                            profile_link = await page.query_selector(selector)
-                            if profile_link:
-                                href = await profile_link.get_attribute("href")
-                                if href and "/in/" in href:
-                                    profile_url = href
-                                    # Extract username from URL
-                                    username = href.rstrip('/').split('/')[-1]
-                                    break
-                        except:
-                            continue
+                    if nav_loaded:
+                        # Try to find the "Me" menu button
+                        me_button_selectors = [
+                            "button[aria-label*='View profile']",
+                            "button.global-nav__primary-link--me",
+                            "div.global-nav__me > button",
+                            "img.global-nav__me-photo",
+                            "a.global-nav__primary-link--me-menu-trigger"
+                        ]
 
-                    # Extract full name from profile area
-                    name_selectors = [
-                        "div.global-nav__me-content .text-heading-small",
-                        "div.global-nav__me-content .t-16.t-black.t-bold",
-                        "div.global-nav__me-content strong",
-                        "span.text-heading-small"
-                    ]
-
-                    for selector in name_selectors:
-                        try:
-                            name_element = await page.query_selector(selector)
-                            if name_element:
-                                text = await name_element.inner_text()
-                                if text and text.strip() and len(text.strip()) > 2:
-                                    full_name = text.strip()
+                        me_button = None
+                        for selector in me_button_selectors:
+                            try:
+                                me_button = await page.wait_for_selector(selector, timeout=5000)
+                                if me_button:
                                     break
-                        except:
-                            continue
+                            except PlaywrightTimeoutError:
+                                continue
+                            except Exception:
+                                continue
+
+                        if me_button:
+                            # Click on the Me menu
+                            await me_button.click()
+                            await self._human_delay(2, 4)
+
+                            # Look for profile information in the dropdown
+                            profile_selectors = [
+                                "div.global-nav__me-content a[href*='/in/']",
+                                "a[data-control-name='identity_welcome_message']",
+                                "div.global-nav__me-content div.text-heading-small",
+                                "div.global-nav__me-content .t-16"
+                            ]
+
+                            # Extract profile URL and username
+                            for selector in profile_selectors:
+                                try:
+                                    profile_link = await page.query_selector(selector)
+                                    if profile_link:
+                                        href = await profile_link.get_attribute("href")
+                                        if href and "/in/" in href:
+                                            profile_url = href
+                                            # Extract username from URL
+                                            username = href.rstrip('/').split('/')[-1]
+                                            break
+                                except Exception:
+                                    continue
+
+                            # Extract full name from profile area
+                            name_selectors = [
+                                "div.global-nav__me-content .text-heading-small",
+                                "div.global-nav__me-content .t-16.t-black.t-bold",
+                                "div.global-nav__me-content strong",
+                                "span.text-heading-small"
+                            ]
+
+                            for selector in name_selectors:
+                                try:
+                                    name_element = await page.query_selector(selector)
+                                    if name_element:
+                                        text = await name_element.inner_text()
+                                        if text and text.strip() and len(text.strip()) > 2:
+                                            full_name = text.strip()
+                                            break
+                                except Exception:
+                                    continue
 
                     # Try alternative method - go to profile page directly
                     if not username or not full_name:
