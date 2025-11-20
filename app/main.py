@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, ConfigDict
 
@@ -10,7 +12,7 @@ class CookiePayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     li_at: str
-    jsessionid: str | None = ""
+    jsessionid: Optional[str] = ""
 
 
 @app.post("/verify")
