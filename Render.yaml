@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: linkedin-cookie-verifier
+    runtime: python
+    envVars:
+      - key: LINKEDIN_VERIFIER_MODE
+        value: playwright
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: /tmp/playwright
+      - key: PYTHONUNBUFFERED
+        value: "1"
+    buildCommand: |
+      pip install -r requirements.txt
+      bash scripts/install_playwright.sh
+    startCommand: uvicorn app.main:app --host=0.0.0.0 --port=$PORT
+    healthCheckPath: /health
+    plan: free
