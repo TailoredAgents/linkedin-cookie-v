@@ -14,4 +14,4 @@ services:
       bash scripts/install_playwright.sh
     startCommand: uvicorn app.main:app --host=0.0.0.0 --port=$PORT
     healthCheckPath: /health
-    plan: free
+    plan: starter
