@@ -119,7 +119,7 @@ class _LinkedInCookieVerifier:
         self.context: Optional[BrowserContext] = None
         self.verification_count = 0
         self.last_verification_time = 0
-        self.min_delay_between_verifications = 30  # seconds
+        self.min_delay_between_verifications = float(os.getenv("LINKEDIN_RATE_LIMIT_SECONDS", "5"))
 
         self.verifier_mode, self.mode_reason = determine_verifier_mode()
         self.api_endpoint = os.getenv("LINKEDIN_COOKIE_VERIFIER_API")
@@ -128,6 +128,10 @@ class _LinkedInCookieVerifier:
         self.api_timeout = float(os.getenv("LINKEDIN_COOKIE_VERIFIER_TIMEOUT", "15"))
         self.browsers_path = os.getenv("PLAYWRIGHT_BROWSERS_PATH") or DEFAULT_PLAYWRIGHT_BROWSERS_PATH
         os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", self.browsers_path)
+        self.nav_timeout_ms = int(os.getenv("LINKEDIN_NAV_TIMEOUT_MS", "8000"))
+        self.goto_timeout_ms = int(os.getenv("LINKEDIN_GOTO_TIMEOUT_MS", "12000"))
+        self.human_delay_min = float(os.getenv("LINKEDIN_HUMAN_DELAY_MIN", "0.5"))
+        self.human_delay_max = float(os.getenv("LINKEDIN_HUMAN_DELAY_MAX", "1.5"))
 
         # User agents for rotation
         self.user_agents = [
@@ -233,18 +237,19 @@ class _LinkedInCookieVerifier:
                 };
             """)
 
-    async def _apply_rate_limiting(self) -> bool:
-        """Apply rate limiting between verifications"""
+    async def _apply_rate_limiting(self) -> float:
+        """Apply rate limiting between verifications.
+
+        Returns remaining seconds to wait (0 if allowed).
+        """
         current_time = time.time()
         time_since_last = current_time - self.last_verification_time
 
         if time_since_last < self.min_delay_between_verifications:
-            sleep_time = self.min_delay_between_verifications - time_since_last
-            logger.info(f"Rate limiting: waiting {sleep_time:.1f} seconds before verification")
-            await asyncio.sleep(sleep_time)
+            return self.min_delay_between_verifications - time_since_last
 
-        self.last_verification_time = time.time()
-        return True
+        self.last_verification_time = current_time
+        return 0.0
 
     async def _ensure_playwright_browsers(self) -> None:
         """Install Playwright Chromium if it is missing at runtime."""
@@ -443,9 +448,13 @@ class _LinkedInCookieVerifier:
 
         return result
 
-    async def _human_delay(self, min_seconds: float = 2.0, max_seconds: float = 5.0) -> None:
-        """Add human-like delays between actions"""
-        delay = random.uniform(min_seconds, max_seconds)
+    async def _human_delay(self, min_seconds: Optional[float] = None, max_seconds: Optional[float] = None) -> None:
+        """Add human-like delays between actions (tunable via env)."""
+        min_s = self.human_delay_min if min_seconds is None else min_seconds
+        max_s = self.human_delay_max if max_seconds is None else max_seconds
+        if max_s < min_s:
+            max_s = min_s
+        delay = random.uniform(min_s, max_s)
         await asyncio.sleep(delay)
 
     async def verify_linkedin_cookies(
@@ -479,7 +488,13 @@ class _LinkedInCookieVerifier:
 
         try:
             # Apply rate limiting
-            await self._apply_rate_limiting()
+            remaining = await self._apply_rate_limiting()
+            if remaining > 0:
+                logger.warning("Rate limited; %.1fs until next verification", remaining)
+                return CookieVerificationResult(
+                    status=VerificationStatus.RATE_LIMITED,
+                    error_message=f"Rate limited; retry in {int(remaining) + 1}s",
+                )
 
             if self.verifier_mode == "api":
                 return await self._verify_via_api(
@@ -524,9 +539,9 @@ class _LinkedInCookieVerifier:
                 # Navigate to LinkedIn feed
                 await page.goto("https://www.linkedin.com/feed/",
                               wait_until="domcontentloaded",
-                              timeout=30000)
+                              timeout=self.goto_timeout_ms)
 
-                await self._human_delay(3, 6)
+                await self._human_delay()
 
                 # Check if we're redirected to login (invalid cookies)
                 current_url = page.url
@@ -539,7 +554,7 @@ class _LinkedInCookieVerifier:
 
                 # Look for profile elements
                 try:
-                    nav_timeout_ms = int(os.getenv("LINKEDIN_NAV_TIMEOUT_MS", "15000"))
+                    nav_timeout_ms = self.nav_timeout_ms
                     nav_loaded = False
                     try:
                         # Wait for navigation bar, but tolerate slow loads by falling back.
@@ -547,7 +562,7 @@ class _LinkedInCookieVerifier:
                         nav_loaded = True
                     except PlaywrightTimeoutError:
                         logger.warning("Timed out waiting for LinkedIn nav; falling back to profile page scrape.")
-                    await self._human_delay(2, 4)
+                    await self._human_delay()
 
                     username = None
                     full_name = None
@@ -577,7 +592,7 @@ class _LinkedInCookieVerifier:
                         if me_button:
                             # Click on the Me menu
                             await me_button.click()
-                            await self._human_delay(2, 4)
+                            await self._human_delay()
 
                             # Look for profile information in the dropdown
                             profile_selectors = [
@@ -623,8 +638,8 @@ class _LinkedInCookieVerifier:
                     # Try alternative method - go to profile page directly
                     if not username or not full_name:
                         try:
-                            await page.goto("https://www.linkedin.com/in/me/", timeout=15000)
-                            await self._human_delay(2, 4)
+                            await page.goto("https://www.linkedin.com/in/me/", timeout=self.goto_timeout_ms)
+                            await self._human_delay()
 
                             # Get username from URL
                             current_url = page.url
@@ -783,7 +798,19 @@ async def verify_linkedin_cookies(
         CookieVerificationResult with verification status and user data
     """
     verifier = await get_cookie_verifier()
-    return await verifier.verify_linkedin_cookies(li_at, jsessionid, tenant_id, user_id)
+    timeout_s = float(os.getenv("LINKEDIN_VERIFICATION_TIMEOUT_S", "14.5"))
+    try:
+        if timeout_s > 0:
+            return await asyncio.wait_for(
+                verifier.verify_linkedin_cookies(li_at, jsessionid, tenant_id, user_id),
+                timeout=timeout_s,
+            )
+        return await verifier.verify_linkedin_cookies(li_at, jsessionid, tenant_id, user_id)
+    except asyncio.TimeoutError:
+        return CookieVerificationResult(
+            status=VerificationStatus.NETWORK_ERROR,
+            error_message=f"Verification timed out after {timeout_s:.1f}s",
+        )
 
 
 async def warm_playwright() -> None:
